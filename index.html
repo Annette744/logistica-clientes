@@ -1,0 +1,367 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, addDoc, onSnapshot, query, serverTimestamp } from 'firebase/firestore';
+import { MapPin, Phone, User, Send, Download, Loader2, Map as MapIcon, List } from 'lucide-react';
+
+// Configuración de Firebase (proporcionada por el entorno)
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'logistica-delivery-app';
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [registros, setRegistros] = useState([]);
+  const [view, setView] = useState('form'); // 'form' | 'list' | 'map'
+  
+  // Estado del formulario
+  const [formData, setFormData] = useState({
+    cliente: '',
+    telefono: '',
+    vendedor: '',
+    ubicacion: null // { lat, lng }
+  });
+  const [geoStatus, setGeoStatus] = useState('idle'); // 'idle' | 'locating' | 'success' | 'error'
+
+  // 1. Manejo de Autenticación
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth Error:", err);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Suscripción a Datos (Firestore)
+  useEffect(() => {
+    if (!user) return;
+
+    const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'entregas'));
+    const unsubscribe = onSnapshot(q, 
+      (snapshot) => {
+        const data = snapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        }));
+        // Ordenar por fecha localmente (Regla 2: No complex queries)
+        const sorted = data.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+        setRegistros(sorted);
+      },
+      (error) => console.error("Firestore Error:", error)
+    );
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // Obtener Ubicación Actual
+  const handleGetLocation = () => {
+    setGeoStatus('locating');
+    if (!navigator.geolocation) {
+      setGeoStatus('error');
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setFormData(prev => ({
+          ...prev,
+          ubicacion: {
+            lat: position.coords.latitude,
+            lng: position.coords.longitude
+          }
+        }));
+        setGeoStatus('success');
+      },
+      () => {
+        setGeoStatus('error');
+      }
+    );
+  };
+
+  // Guardar Registro
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!formData.ubicacion) {
+      alert("Por favor captura la ubicación antes de guardar.");
+      return;
+    }
+
+    try {
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'entregas'), {
+        ...formData,
+        createdAt: serverTimestamp(),
+        userId: user.uid
+      });
+      
+      // Reset form
+      setFormData({ cliente: '', telefono: '', vendedor: '', ubicacion: null });
+      setGeoStatus('idle');
+      setView('list');
+    } catch (err) {
+      console.error("Error guardando:", err);
+    }
+  };
+
+  // Exportar a Excel (CSV)
+  const exportToCSV = () => {
+    if (registros.length === 0) return;
+
+    const headers = ["ID", "Cliente/Contacto", "Teléfono", "Vendedor", "Latitud", "Longitud", "Fecha"];
+    const rows = registros.map(r => [
+      r.id,
+      `"${r.cliente}"`,
+      r.telefono,
+      `"${r.vendedor}"`,
+      r.ubicacion.lat,
+      r.ubicacion.lng,
+      r.createdAt?.toDate().toLocaleString() || 'N/A'
+    ]);
+
+    const csvContent = [headers, ...rows].map(e => e.join(",")).join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `entregas_logistica_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-gray-50">
+        <Loader2 className="w-12 h-12 animate-spin text-blue-600" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex flex-col font-sans text-slate-900">
+      {/* Header */}
+      <header className="bg-blue-700 text-white p-4 shadow-lg sticky top-0 z-50">
+        <div className="max-w-4xl mx-auto flex justify-between items-center">
+          <h1 className="text-xl font-bold flex items-center gap-2">
+            <MapPin className="w-6 h-6" /> Logística Pro
+          </h1>
+          <button 
+            onClick={exportToCSV}
+            className="bg-green-600 hover:bg-green-500 p-2 rounded-lg flex items-center gap-2 text-sm transition-colors"
+          >
+            <Download className="w-4 h-4" /> Exportar Excel
+          </button>
+        </div>
+      </header>
+
+      {/* Tabs / Navigation */}
+      <nav className="bg-white border-b flex justify-around p-2 max-w-4xl mx-auto w-full sticky top-[64px] z-40">
+        <button 
+          onClick={() => setView('form')}
+          className={`flex-1 flex flex-col items-center py-2 transition-colors ${view === 'form' ? 'text-blue-600' : 'text-gray-400'}`}
+        >
+          <Send className="w-5 h-5" />
+          <span className="text-xs mt-1">Nuevo</span>
+        </button>
+        <button 
+          onClick={() => setView('list')}
+          className={`flex-1 flex flex-col items-center py-2 transition-colors ${view === 'list' ? 'text-blue-600' : 'text-gray-400'}`}
+        >
+          <List className="w-5 h-5" />
+          <span className="text-xs mt-1">Registros</span>
+        </button>
+        <button 
+          onClick={() => setView('map')}
+          className={`flex-1 flex flex-col items-center py-2 transition-colors ${view === 'map' ? 'text-blue-600' : 'text-gray-400'}`}
+        >
+          <MapIcon className="w-5 h-5" />
+          <span className="text-xs mt-1">Mapa</span>
+        </button>
+      </nav>
+
+      <main className="flex-1 max-w-4xl mx-auto w-full p-4 pb-20">
+        
+        {/* Formulario de Registro */}
+        {view === 'form' && (
+          <div className="bg-white rounded-xl shadow-md p-6 animate-in fade-in slide-in-from-bottom-4">
+            <h2 className="text-lg font-semibold mb-6 flex items-center gap-2 border-b pb-2">
+              <User className="w-5 h-5 text-blue-600" /> Datos de Entrega
+            </h2>
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre del Cliente / Contacto</label>
+                <input 
+                  required
+                  type="text"
+                  placeholder="Ej: Juan Pérez - Ferretería El Sol"
+                  className="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                  value={formData.cliente}
+                  onChange={(e) => setFormData({...formData, cliente: e.target.value})}
+                />
+              </div>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Teléfono</label>
+                  <div className="relative">
+                    <Phone className="absolute left-3 top-3.5 w-4 h-4 text-gray-400" />
+                    <input 
+                      required
+                      type="tel"
+                      placeholder="Número de contacto"
+                      className="w-full p-3 pl-10 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                      value={formData.telefono}
+                      onChange={(e) => setFormData({...formData, telefono: e.target.value})}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Vendedor</label>
+                  <input 
+                    required
+                    type="text"
+                    placeholder="Nombre del vendedor"
+                    className="w-full p-3 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                    value={formData.vendedor}
+                    onChange={(e) => setFormData({...formData, vendedor: e.target.value})}
+                  />
+                </div>
+              </div>
+
+              <div className="pt-4">
+                <button 
+                  type="button"
+                  onClick={handleGetLocation}
+                  className={`w-full p-4 rounded-lg border-2 border-dashed flex flex-col items-center justify-center gap-2 transition-all ${
+                    geoStatus === 'success' ? 'bg-green-50 border-green-500 text-green-700' : 
+                    geoStatus === 'error' ? 'bg-red-50 border-red-500 text-red-700' :
+                    'bg-blue-50 border-blue-200 text-blue-700 hover:bg-blue-100'
+                  }`}
+                >
+                  {geoStatus === 'locating' ? (
+                    <>
+                      <Loader2 className="w-6 h-6 animate-spin" />
+                      <span className="font-medium text-sm">Obteniendo coordenadas...</span>
+                    </>
+                  ) : geoStatus === 'success' ? (
+                    <>
+                      <MapPin className="w-6 h-6" />
+                      <span className="font-medium text-sm">Ubicación capturada correctamente</span>
+                      <span className="text-xs opacity-75">{formData.ubicacion.lat.toFixed(6)}, {formData.ubicacion.lng.toFixed(6)}</span>
+                    </>
+                  ) : (
+                    <>
+                      <MapPin className="w-6 h-6" />
+                      <span className="font-medium text-sm">Haz clic para capturar ubicación actual</span>
+                      <span className="text-xs opacity-60">Se requiere permiso de GPS</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <button 
+                type="submit"
+                disabled={!formData.ubicacion}
+                className={`w-full py-4 mt-6 rounded-lg font-bold text-white shadow-lg transition-all ${
+                  !formData.ubicacion ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 active:scale-95'
+                }`}
+              >
+                Guardar Entrega
+              </button>
+            </form>
+          </div>
+        )}
+
+        {/* Lista de Registros */}
+        {view === 'list' && (
+          <div className="space-y-4 animate-in fade-in slide-in-from-right-4">
+            <h2 className="text-lg font-bold px-1">Últimos Registros ({registros.length})</h2>
+            {registros.length === 0 ? (
+              <div className="bg-white p-12 text-center rounded-xl text-gray-400">
+                Aún no hay entregas registradas.
+              </div>
+            ) : (
+              registros.map(reg => (
+                <div key={reg.id} className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex justify-between items-center group hover:border-blue-200 transition-colors">
+                  <div>
+                    <h3 className="font-bold text-slate-800">{reg.cliente}</h3>
+                    <div className="flex gap-4 text-xs text-gray-500 mt-1">
+                      <span className="flex items-center gap-1"><Phone className="w-3 h-3" /> {reg.telefono}</span>
+                      <span className="flex items-center gap-1"><User className="w-3 h-3" /> {reg.vendedor}</span>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <a 
+                      href={`https://www.google.com/maps?q=${reg.ubicacion.lat},${reg.ubicacion.lng}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-600 hover:text-blue-800 text-xs font-semibold flex items-center gap-1 bg-blue-50 px-3 py-1.5 rounded-full"
+                    >
+                      <MapIcon className="w-3 h-3" /> Ver en Maps
+                    </a>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
+        {/* Mapa Consolidado */}
+        {view === 'map' && (
+          <div className="bg-white rounded-xl shadow-md p-2 h-[600px] flex flex-col animate-in zoom-in-95">
+             <div className="p-4 flex-1 relative bg-gray-100 rounded-lg overflow-hidden">
+                {/* Nota: En un entorno de producción usaríamos Google Maps o Leaflet. 
+                    Aquí simulamos la vista del mapa con los pines de los registros */}
+                <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-center p-8">
+                   <div>
+                     <MapIcon className="w-12 h-12 mx-auto mb-2 opacity-20" />
+                     <p>Visualización de mapa interactivo</p>
+                     <p className="text-xs">Para esta versión, puedes acceder a la ubicación de cada cliente desde la pestaña 'Registros' usando el botón 'Ver en Maps'.</p>
+                   </div>
+                </div>
+
+                {/* Marcadores Visuales (Simulados sobre un fondo) */}
+                {registros.map((r, i) => (
+                   <div 
+                    key={r.id}
+                    className="absolute bg-blue-600 w-3 h-3 rounded-full border-2 border-white shadow-lg animate-bounce"
+                    style={{ 
+                      left: `${50 + (Math.sin(i) * 30)}%`, 
+                      top: `${50 + (Math.cos(i) * 30)}%` 
+                    }}
+                    title={r.cliente}
+                   />
+                ))}
+             </div>
+             <div className="p-4 border-t">
+               <p className="text-sm text-gray-500 italic text-center">
+                 Toda la información capturada por los vendedores se centraliza automáticamente.
+               </p>
+             </div>
+          </div>
+        )}
+      </main>
+
+      {/* Footer / User Info */}
+      <footer className="fixed bottom-0 w-full bg-white border-t p-2 text-[10px] text-gray-400 flex justify-between px-4">
+        <span>ID Usuario: {user?.uid}</span>
+        <span>App ID: {appId}</span>
+      </footer>
+    </div>
+  );
+}
